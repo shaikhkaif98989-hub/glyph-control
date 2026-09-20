@@ -1,13 +1,13 @@
 package com.example.glyphcontrol
 
+import android.Manifest
 import android.app.Activity
-import android.content.ComponentName
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -16,116 +16,77 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
-import com.nothing.ketchum.Common
-import com.nothing.ketchum.Glyph
-import com.nothing.ketchum.GlyphManager
 
-// Phone (4b) has 4 Glyph zones (index 0..3). Phone (4a) has 6.
 class MainActivity : Activity() {
-    private var gm: GlyphManager? = null
-    private var ready = false
-    private val handler = Handler(Looper.getMainLooper())
-    private var running: Runnable? = null
-    private var stepMs = 300L
     private lateinit var status: TextView
+    private lateinit var callsTile: TextView
+    private lateinit var ringTile: TextView
+    private lateinit var talkTile: TextView
     private val tiles = mutableListOf<TextView>()
     private var zoneOn = BooleanArray(4)
-    private var zones = 4
-
-    private fun isModel(m: String): Boolean = try {
-        (Common::class.java.getMethod(m).invoke(null) as? Boolean) ?: false
-    } catch (e: Throwable) { false }
-
-    private fun devConst(n: String): String? = try {
-        Glyph::class.java.getField(n).get(null) as? String
-    } catch (e: Throwable) { null }
-
-    private val callback = object : GlyphManager.Callback {
-        override fun onServiceConnected(name: ComponentName?) {
-            val g = gm ?: return
-            try {
-                val d = devConst(if (zones == 6) "DEVICE_25111" else "DEVICE_25131")
-                if (d != null) g.register(d) else g.register()
-                g.openSession()
-                ready = true
-                status.text = "Connected"
-            } catch (e: Throwable) { status.text = "Can't connect: ${e.message}" }
-        }
-
-        override fun onServiceDisconnected(name: ComponentName?) {
-            ready = false
-            try { gm?.closeSession() } catch (e: Throwable) {}
-            status.text = "Disconnected"
-        }
-    }
+    private val prefs by lazy { getSharedPreferences("glyph", MODE_PRIVATE) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        zones = if (isModel("is25111")) 6 else 4
-        zoneOn = BooleanArray(zones)
+        GlyphLink.start(this)
+        zoneOn = BooleanArray(GlyphLink.zones)
         setContentView(buildUi())
-        gm = GlyphManager.getInstance(applicationContext).also { it.init(callback) }
+        GlyphLink.onStatus = { status.text = it }
+        status.text = GlyphLink.status
+        if (prefs.getBoolean("calls", false) && hasPhonePermission()) {
+            startForegroundService(Intent(this, CallGlyphService::class.java))
+        }
     }
 
     override fun onPause() {
-        stopPattern()
-        try { gm?.turnOff() } catch (e: Throwable) {}
+        if (!GlyphLink.callMode) GlyphLink.stop()
         super.onPause()
     }
 
     override fun onDestroy() {
-        stopPattern()
-        try { gm?.turnOff(); gm?.closeSession() } catch (e: Throwable) {}
-        try { gm?.unInit() } catch (e: Throwable) {}
+        GlyphLink.onStatus = null
         super.onDestroy()
     }
 
-    // Light exactly these zones; everything else goes off.
-    private fun show(list: List<Int>) {
-        val g = gm ?: return
-        if (!ready) { status.text = "Not connected yet"; return }
-        try {
-            if (list.isEmpty()) { g.turnOff(); return }
-            var b = g.getGlyphFrameBuilder()
-            for (z in list) b = b.buildChannel(z)
-            g.toggle(b.build())
-        } catch (e: Throwable) { status.text = "Error: ${e.message}" }
-    }
+    private fun hasPhonePermission() =
+        checkSelfPermission(Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED
 
-    private fun breathe() {
-        stopPattern()
-        val g = gm ?: return
-        if (!ready) { status.text = "Not connected yet"; return }
-        try {
-            var b = g.getGlyphFrameBuilder()
-            for (z in 0 until zones) b = b.buildChannel(z)
-            g.animate(b.buildPeriod(2000).buildCycles(100).buildInterval(10).build())
-        } catch (e: Throwable) { status.text = "Error: ${e.message}" }
-    }
-
-    private fun startPattern(frames: List<List<Int>>) {
-        stopPattern()
-        var i = 0
-        val r = object : Runnable {
-            override fun run() {
-                show(frames[i % frames.size])
-                i++
-                handler.postDelayed(this, stepMs)
-            }
+    private fun toggleCalls() {
+        if (prefs.getBoolean("calls", false)) {
+            setCalls(false)
+        } else if (hasPhonePermission()) {
+            setCalls(true)
+        } else {
+            requestPermissions(
+                arrayOf(Manifest.permission.READ_PHONE_STATE, Manifest.permission.POST_NOTIFICATIONS), 7
+            )
         }
-        running = r
-        handler.post(r)
     }
 
-    private fun stopPattern() {
-        running?.let { handler.removeCallbacks(it) }
-        running = null
+    override fun onRequestPermissionsResult(code: Int, perms: Array<out String>, res: IntArray) {
+        super.onRequestPermissionsResult(code, perms, res)
+        if (hasPhonePermission()) setCalls(true) else status.text = "Allow the Phone permission to use call lights"
+    }
+
+    private fun setCalls(on: Boolean) {
+        prefs.edit().putBoolean("calls", on).apply()
+        val i = Intent(this, CallGlyphService::class.java)
+        if (on) startForegroundService(i) else stopService(i)
+        styleAuto()
+    }
+
+    private fun cycle(key: String, def: String): String {
+        val names = GlyphLink.patternNames
+        val cur = prefs.getString(key, def) ?: def
+        val next = names[(names.indexOf(cur) + 1) % names.size]
+        prefs.edit().putString(key, next).apply()
+        return next
     }
 
     private fun applyManual() {
-        stopPattern()
-        show(zoneOn.indices.filter { zoneOn[it] })
+        GlyphLink.cancelLoop()
+        GlyphLink.show(zoneOn.indices.filter { zoneOn[it] })
     }
 
     private fun setAll(on: Boolean) {
@@ -174,6 +135,15 @@ class MainActivity : Activity() {
         tiles[i].background = rounded(if (on) Color.WHITE else 0xFF2A2A2E.toInt())
     }
 
+    private fun styleAuto() {
+        val on = prefs.getBoolean("calls", false)
+        callsTile.text = if (on) "Call lights: ON (tap to turn off)" else "Call lights: OFF (tap to turn on)"
+        callsTile.setTextColor(if (on) Color.BLACK else Color.WHITE)
+        callsTile.background = rounded(if (on) Color.WHITE else 0xFF26262B.toInt())
+        ringTile.text = "When phone rings: ${prefs.getString("ring", "Chase")}  (tap to change)"
+        talkTile.text = "While on a call: ${prefs.getString("talk", "Off")}  (tap to change)"
+    }
+
     private fun buildUi(): ScrollView {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -187,7 +157,7 @@ class MainActivity : Activity() {
             setPadding(0, dp(24), 0, dp(8))
         })
 
-        for (i in 0 until zones) {
+        for (i in 0 until GlyphLink.zones) {
             val t = TextView(this).apply {
                 gravity = Gravity.CENTER
                 textSize = 20f
@@ -208,15 +178,10 @@ class MainActivity : Activity() {
 
         root.addView(row(pill("All on") { setAll(true) }, pill("All off") { setAll(false) }))
 
-        val all = (0 until zones).toList()
-        val chase = all.map { listOf(it) }
-        val bounce = chase + (zones - 2 downTo 1).map { listOf(it) }
-        val fill = all.map { n -> all.take(n + 1) } + listOf(emptyList<Int>())
-
         root.addView(label("Patterns", 16f).apply { setPadding(0, dp(24), 0, dp(8)) })
-        root.addView(row(pill("Chase") { startPattern(chase) }, pill("Bounce") { startPattern(bounce) }))
-        root.addView(row(pill("Fill up") { startPattern(fill) }, pill("Blink") { startPattern(listOf(all, emptyList<Int>())) }))
-        root.addView(row(pill("Breathe") { breathe() }, pill("Stop") { setAll(false) }))
+        root.addView(row(pill("Chase") { GlyphLink.play("Chase") }, pill("Bounce") { GlyphLink.play("Bounce") }))
+        root.addView(row(pill("Fill up") { GlyphLink.play("Fill up") }, pill("Blink") { GlyphLink.play("Blink") }))
+        root.addView(row(pill("Breathe") { GlyphLink.play("Breathe") }, pill("Stop") { setAll(false) }))
 
         root.addView(label("Pattern speed (right = faster)", 14f, 0xFF9A9AA0.toInt()).apply {
             setPadding(0, dp(24), 0, 0)
@@ -225,11 +190,20 @@ class MainActivity : Activity() {
             max = 940
             progress = 700
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) { stepMs = 1000L - p }
+                override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) { GlyphLink.stepMs = 1000L - p }
                 override fun onStartTrackingTouch(sb: SeekBar?) {}
                 override fun onStopTrackingTouch(sb: SeekBar?) {}
             })
         })
+
+        root.addView(label("Automatic (phone calls)", 16f).apply { setPadding(0, dp(24), 0, dp(8)) })
+        callsTile = pill("") { toggleCalls() }
+        ringTile = pill("") { val n = cycle("ring", "Chase"); GlyphLink.play(n); styleAuto() }
+        talkTile = pill("") { val n = cycle("talk", "Off"); GlyphLink.play(n); styleAuto() }
+        root.addView(row(callsTile))
+        root.addView(row(ringTile))
+        root.addView(row(talkTile))
+        styleAuto()
 
         return ScrollView(this).apply {
             setBackgroundColor(Color.BLACK)
