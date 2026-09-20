@@ -91,6 +91,10 @@ jobs:
             <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
                 <uses-permission android:name="com.nothing.ketchum.permission.ENABLE" />
+                <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+                <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+                <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+                <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
                 <application
                     android:allowBackup="true"
@@ -100,6 +104,15 @@ jobs:
                     <meta-data
                         android:name="NothingKey"
                         android:value="test" />
+
+                    <service
+                        android:name=".CallGlyphService"
+                        android:exported="false"
+                        android:foregroundServiceType="specialUse">
+                        <property
+                            android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                            android:value="glyph_call_lights" />
+                    </service>
 
                     <activity
                         android:name=".MainActivity"
