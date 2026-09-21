@@ -34,7 +34,7 @@ object GlyphLink {
 
     val patternNames = listOf("Off", "Chase", "Bounce", "Fill up", "Blink", "Breathe", "All on")
 
-    private fun setStatus(s: String) {
+    private fun note(s: String) {
         status = s
         onStatus?.invoke(s)
     }
@@ -60,17 +60,17 @@ object GlyphLink {
                     if (d != null) g.register(d) else g.register()
                     g.openSession()
                     ready = true
-                    setStatus("Connected")
+                    note("Connected")
                     val todo = pending.toList()
                     pending.clear()
                     todo.forEach { it() }
-                } catch (e: Throwable) { setStatus("Can't connect: ${e.message}") }
+                } catch (e: Throwable) { note("Can't connect: ${e.message}") }
             }
 
             override fun onServiceDisconnected(name: ComponentName?) {
                 ready = false
                 try { g.closeSession() } catch (e: Throwable) {}
-                setStatus("Disconnected")
+                note("Disconnected")
             }
         })
     }
@@ -82,13 +82,13 @@ object GlyphLink {
     // Light exactly these zones; everything else goes off.
     fun show(list: List<Int>) {
         val g = gm ?: return
-        if (!ready) { setStatus("Not connected yet"); return }
+        if (!ready) { note("Not connected yet"); return }
         try {
             if (list.isEmpty()) { g.turnOff(); return }
             var b = g.getGlyphFrameBuilder()
             for (z in list) b = b.buildChannel(z)
             g.toggle(b.build())
-        } catch (e: Throwable) { setStatus("Error: ${e.message}") }
+        } catch (e: Throwable) { note("Error: ${e.message}") }
     }
 
     fun cancelLoop() {
@@ -120,7 +120,7 @@ object GlyphLink {
             var b = g.getGlyphFrameBuilder()
             for (z in 0 until zones) b = b.buildChannel(z)
             g.animate(b.buildPeriod(2000).buildCycles(100).buildInterval(10).build())
-        } catch (e: Throwable) { setStatus("Error: ${e.message}") }
+        } catch (e: Throwable) { note("Error: ${e.message}") }
     }
 
     fun play(name: String) = whenReady {
