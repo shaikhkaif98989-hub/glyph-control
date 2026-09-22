@@ -1,5 +1,6 @@
 package com.example.glyphcontrol
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -7,7 +8,9 @@ import android.app.Service
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.media.AudioManager
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -17,7 +20,7 @@ import com.nothing.ketchum.Common
 import com.nothing.ketchum.Glyph
 import com.nothing.ketchum.GlyphManager
 
-// One shared connection to the Glyph, used by the app screen and the call service.
+// One shared connection to the Glyph, used by the app screen and the background service.
 object GlyphLink {
     private var gm: GlyphManager? = null
     private var started = false
@@ -27,6 +30,7 @@ object GlyphLink {
 
     @Volatile var ready = false
     @Volatile var callMode = false
+    @Volatile var musicMode = false
     var zones = 4
     var stepMs = 300L
     var status = "Connecting..."
@@ -147,38 +151,68 @@ object GlyphLink {
         callMode = false
         stop()
     }
+
+    fun musicPlay(name: String) {
+        musicMode = true
+        play(name)
+    }
+
+    fun musicEnd() {
+        musicMode = false
+        stop()
+    }
 }
 
-// Keeps running in the background and starts a pattern when the phone rings / is on a call.
+// Runs in the background: lights the Glyph for phone calls and/or while music is playing.
 class CallGlyphService : Service() {
     private var callback: TelephonyCallback? = null
     private var last = TelephonyManager.CALL_STATE_IDLE
+    private val handler = Handler(Looper.getMainLooper())
+    private var watching = false
+    private var musicPlaying = false
+
+    private val poll = object : Runnable {
+        override fun run() {
+            checkMusic()
+            handler.postDelayed(this, 1000)
+        }
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val nm = getSystemService(NotificationManager::class.java)
         nm?.createNotificationChannel(
-            NotificationChannel("glyph", "Glyph call lights", NotificationManager.IMPORTANCE_LOW)
+            NotificationChannel("glyph", "Glyph lights", NotificationManager.IMPORTANCE_LOW)
         )
         val n = Notification.Builder(this, "glyph")
-            .setContentTitle("Glyph call lights are on")
-            .setContentText("Your Glyph reacts to phone calls")
+            .setContentTitle("Glyph lights are on")
+            .setContentText("Your Glyph reacts to calls and music")
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setOngoing(true)
             .build()
         startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         GlyphLink.start(this)
-        listen()
+        sync()
         return START_STICKY
+    }
+
+    private fun prefs() = getSharedPreferences("glyph", MODE_PRIVATE)
+
+    // Turn each feature on or off according to the saved settings.
+    private fun sync() {
+        val p = prefs()
+        if (p.getBoolean("calls", false)) listen() else unlisten()
+        if (p.getBoolean("music", false)) startWatch() else stopWatch()
     }
 
     private fun listen() {
         if (callback != null) return
+        if (checkSelfPermission(Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) return
         val tm = getSystemService(TelephonyManager::class.java) ?: return
         val cb = object : TelephonyCallback(), TelephonyCallback.CallStateListener {
             override fun onCallStateChanged(state: Int) {
-                val p = getSharedPreferences("glyph", MODE_PRIVATE)
+                val p = prefs()
                 val prev = last
                 last = state
                 when (state) {
@@ -186,7 +220,10 @@ class CallGlyphService : Service() {
                         GlyphLink.callPlay(p.getString("ring", "Chase") ?: "Off")
                     TelephonyManager.CALL_STATE_OFFHOOK ->
                         GlyphLink.callPlay(p.getString("talk", "Off") ?: "Off")
-                    else -> if (prev != TelephonyManager.CALL_STATE_IDLE) GlyphLink.callEnd()
+                    else -> if (prev != TelephonyManager.CALL_STATE_IDLE) {
+                        GlyphLink.callEnd()
+                        checkMusic(true)
+                    }
                 }
             }
         }
@@ -194,16 +231,46 @@ class CallGlyphService : Service() {
             tm.registerTelephonyCallback(mainExecutor, cb)
             callback = cb
         } catch (e: SecurityException) {
-            stopSelf()
         }
     }
 
-    override fun onDestroy() {
-        callback?.let {
-            try { getSystemService(TelephonyManager::class.java)?.unregisterTelephonyCallback(it) } catch (e: Throwable) {}
-        }
+    private fun unlisten() {
+        val cb = callback ?: return
+        try { getSystemService(TelephonyManager::class.java)?.unregisterTelephonyCallback(cb) } catch (e: Throwable) {}
         callback = null
+        last = TelephonyManager.CALL_STATE_IDLE
+        if (GlyphLink.callMode) GlyphLink.callEnd()
+    }
+
+    private fun startWatch() {
+        if (watching) return
+        watching = true
+        handler.post(poll)
+    }
+
+    private fun stopWatch() {
+        if (!watching) return
+        watching = false
+        handler.removeCallbacks(poll)
+        if (musicPlaying && !GlyphLink.callMode) GlyphLink.musicEnd()
+        musicPlaying = false
+    }
+
+    // Looks at whether music is playing; a phone call always has priority.
+    private fun checkMusic(force: Boolean = false) {
+        val am = getSystemService(AudioManager::class.java) ?: return
+        val now = am.isMusicActive
+        if (now == musicPlaying && !force) return
+        musicPlaying = now
+        if (GlyphLink.callMode) return
+        if (now) GlyphLink.musicPlay(prefs().getString("song", "Bounce") ?: "Off") else GlyphLink.musicEnd()
+    }
+
+    override fun onDestroy() {
+        unlisten()
+        stopWatch()
         GlyphLink.callEnd()
+        GlyphLink.musicEnd()
         super.onDestroy()
     }
 }
