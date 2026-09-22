@@ -5,12 +5,15 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.media.AudioManager
+import android.os.BatteryManager
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -19,6 +22,7 @@ import android.telephony.TelephonyManager
 import com.nothing.ketchum.Common
 import com.nothing.ketchum.Glyph
 import com.nothing.ketchum.GlyphManager
+import kotlin.math.ceil
 
 // One shared connection to the Glyph, used by the app screen and the background service.
 object GlyphLink {
@@ -26,6 +30,7 @@ object GlyphLink {
     private var started = false
     private val handler = Handler(Looper.getMainLooper())
     private var running: Runnable? = null
+    private var batteryGen = 0
     private val pending = mutableListOf<() -> Unit>()
 
     @Volatile var ready = false
@@ -161,15 +166,28 @@ object GlyphLink {
         musicMode = false
         stop()
     }
+
+    // Lights zones proportional to a battery percentage for a few seconds. Calls and music win over this.
+    fun batteryShow(pct: Int, holdMs: Long = 4000) = whenReady {
+        if (callMode || musicMode) return@whenReady
+        cancelLoop()
+        val lit = if (pct <= 0) 0 else ceil(pct / 100.0 * zones).toInt().coerceIn(1, zones)
+        show((0 until lit).toList())
+        val myGen = ++batteryGen
+        handler.postDelayed({
+            if (batteryGen == myGen && !callMode && !musicMode) show(emptyList())
+        }, holdMs)
+    }
 }
 
-// Runs in the background: lights the Glyph for phone calls and/or while music is playing.
+// Runs in the background: lights the Glyph for calls, music, and a charging-pickup battery display.
 class CallGlyphService : Service() {
     private var callback: TelephonyCallback? = null
     private var last = TelephonyManager.CALL_STATE_IDLE
     private val handler = Handler(Looper.getMainLooper())
     private var watching = false
     private var musicPlaying = false
+    private var screenReceiver: BroadcastReceiver? = null
 
     private val poll = object : Runnable {
         override fun run() {
@@ -187,7 +205,7 @@ class CallGlyphService : Service() {
         )
         val n = Notification.Builder(this, "glyph")
             .setContentTitle("Glyph lights are on")
-            .setContentText("Your Glyph reacts to calls and music")
+            .setContentText("Your Glyph reacts to calls, music and charging")
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setOngoing(true)
             .build()
@@ -204,6 +222,7 @@ class CallGlyphService : Service() {
         val p = prefs()
         if (p.getBoolean("calls", false)) listen() else unlisten()
         if (p.getBoolean("music", false)) startWatch() else stopWatch()
+        if (p.getBoolean("charge", false)) startChargeWatch() else stopChargeWatch()
     }
 
     private fun listen() {
@@ -266,9 +285,34 @@ class CallGlyphService : Service() {
         if (now) GlyphLink.musicPlay(prefs().getString("song", "Bounce") ?: "Off") else GlyphLink.musicEnd()
     }
 
+    // Shows the battery percentage on the Glyph when the screen turns on while charging.
+    private fun startChargeWatch() {
+        if (screenReceiver != null) return
+        val r = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action == Intent.ACTION_SCREEN_ON) showBatteryIfCharging()
+            }
+        }
+        registerReceiver(r, IntentFilter(Intent.ACTION_SCREEN_ON))
+        screenReceiver = r
+    }
+
+    private fun stopChargeWatch() {
+        screenReceiver?.let { try { unregisterReceiver(it) } catch (e: Throwable) {} }
+        screenReceiver = null
+    }
+
+    private fun showBatteryIfCharging() {
+        val bm = getSystemService(BatteryManager::class.java) ?: return
+        if (!bm.isCharging) return
+        val pct = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+        if (pct in 0..100) GlyphLink.batteryShow(pct)
+    }
+
     override fun onDestroy() {
         unlisten()
         stopWatch()
+        stopChargeWatch()
         GlyphLink.callEnd()
         GlyphLink.musicEnd()
         super.onDestroy()
