@@ -12,6 +12,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.media.AudioAttributes
 import android.media.AudioManager
 import android.os.BatteryManager
 import android.os.Handler
@@ -132,8 +133,10 @@ object GlyphLink {
         } catch (e: Throwable) { note("Error: ${e.message}") }
     }
 
-    fun play(name: String) = whenReady {
+    // speedMs, when given, overrides the shared speed just for this play (used by calls/music/manual).
+    fun play(name: String, speedMs: Long? = null) = whenReady {
         cancelLoop()
+        if (speedMs != null) stepMs = speedMs
         val all = (0 until zones).toList()
         val chase = all.map { listOf(it) }
         when (name) {
@@ -147,9 +150,9 @@ object GlyphLink {
         }
     }
 
-    fun callPlay(name: String) {
+    fun callPlay(name: String, speedMs: Long? = null) {
         callMode = true
-        play(name)
+        play(name, speedMs)
     }
 
     fun callEnd() {
@@ -157,9 +160,9 @@ object GlyphLink {
         stop()
     }
 
-    fun musicPlay(name: String) {
+    fun musicPlay(name: String, speedMs: Long? = null) {
         musicMode = true
-        play(name)
+        play(name, speedMs)
     }
 
     fun musicEnd() {
@@ -236,9 +239,15 @@ class CallGlyphService : Service() {
                 last = state
                 when (state) {
                     TelephonyManager.CALL_STATE_RINGING ->
-                        GlyphLink.callPlay(p.getString("ring", "Chase") ?: "Off")
+                        GlyphLink.callPlay(
+                            p.getString("ring", "Chase") ?: "Off",
+                            p.getInt("ringSpeedMs", 300).toLong()
+                        )
                     TelephonyManager.CALL_STATE_OFFHOOK ->
-                        GlyphLink.callPlay(p.getString("talk", "Off") ?: "Off")
+                        GlyphLink.callPlay(
+                            p.getString("talk", "Off") ?: "Off",
+                            p.getInt("talkSpeedMs", 300).toLong()
+                        )
                     else -> if (prev != TelephonyManager.CALL_STATE_IDLE) {
                         GlyphLink.callEnd()
                         checkMusic(true)
@@ -275,14 +284,26 @@ class CallGlyphService : Service() {
         musicPlaying = false
     }
 
+    // True only for audio tagged as media (music/podcast apps), not games or other sounds.
+    private fun realMusicPlaying(am: AudioManager): Boolean = try {
+        am.activePlaybackConfigurations.any { it.audioAttributes?.usage == AudioAttributes.USAGE_MEDIA }
+    } catch (e: Throwable) {
+        am.isMusicActive
+    }
+
     // Looks at whether music is playing; a phone call always has priority.
     private fun checkMusic(force: Boolean = false) {
         val am = getSystemService(AudioManager::class.java) ?: return
-        val now = am.isMusicActive
+        val now = realMusicPlaying(am)
         if (now == musicPlaying && !force) return
         musicPlaying = now
         if (GlyphLink.callMode) return
-        if (now) GlyphLink.musicPlay(prefs().getString("song", "Bounce") ?: "Off") else GlyphLink.musicEnd()
+        val p = prefs()
+        if (now) {
+            GlyphLink.musicPlay(p.getString("song", "Bounce") ?: "Off", p.getInt("songSpeedMs", 300).toLong())
+        } else {
+            GlyphLink.musicEnd()
+        }
     }
 
     // Shows the battery percentage on the Glyph when the screen turns on while charging.
