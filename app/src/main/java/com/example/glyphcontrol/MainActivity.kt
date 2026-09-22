@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.os.BatteryManager
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
@@ -24,6 +25,7 @@ class MainActivity : Activity() {
     private lateinit var talkTile: TextView
     private lateinit var musicTile: TextView
     private lateinit var songTile: TextView
+    private lateinit var chargeTile: TextView
     private val tiles = mutableListOf<TextView>()
     private var zoneOn = BooleanArray(4)
     private val prefs by lazy { getSharedPreferences("glyph", MODE_PRIVATE) }
@@ -36,7 +38,7 @@ class MainActivity : Activity() {
         setContentView(buildUi())
         GlyphLink.onStatus = { status.text = it }
         status.text = GlyphLink.status
-        if ((prefs.getBoolean("calls", false) || prefs.getBoolean("music", false))) {
+        if (anyAutoOn()) {
             startForegroundService(Intent(this, CallGlyphService::class.java))
         }
     }
@@ -51,16 +53,15 @@ class MainActivity : Activity() {
         super.onDestroy()
     }
 
+    private fun anyAutoOn() =
+        prefs.getBoolean("calls", false) || prefs.getBoolean("music", false) || prefs.getBoolean("charge", false)
+
     private fun hasPhonePermission() =
         checkSelfPermission(Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED
 
     private fun restartService() {
         val i = Intent(this, CallGlyphService::class.java)
-        if (prefs.getBoolean("calls", false) || prefs.getBoolean("music", false)) {
-            startForegroundService(i)
-        } else {
-            stopService(i)
-        }
+        if (anyAutoOn()) startForegroundService(i) else stopService(i)
     }
 
     private fun toggleCalls() {
@@ -82,6 +83,13 @@ class MainActivity : Activity() {
     private fun toggleMusic() {
         val on = !prefs.getBoolean("music", false)
         prefs.edit().putBoolean("music", on).apply()
+        restartService()
+        styleAuto()
+    }
+
+    private fun toggleCharge() {
+        val on = !prefs.getBoolean("charge", false)
+        prefs.edit().putBoolean("charge", on).apply()
         restartService()
         styleAuto()
     }
@@ -114,6 +122,12 @@ class MainActivity : Activity() {
         zoneOn.fill(on)
         tiles.indices.forEach { styleTile(it) }
         applyManual()
+    }
+
+    private fun testBattery() {
+        val bm = getSystemService(BatteryManager::class.java) ?: return
+        val pct = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+        if (pct in 0..100) GlyphLink.batteryShow(pct)
     }
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
@@ -169,6 +183,11 @@ class MainActivity : Activity() {
         musicTile.setTextColor(if (music) Color.BLACK else Color.WHITE)
         musicTile.background = rounded(if (music) Color.WHITE else 0xFF26262B.toInt())
         songTile.text = "While music plays: ${prefs.getString("song", "Bounce")}  (tap to change)"
+
+        val charge = prefs.getBoolean("charge", false)
+        chargeTile.text = if (charge) "Charging lights: ON (tap to turn off)" else "Charging lights: OFF (tap to turn on)"
+        chargeTile.setTextColor(if (charge) Color.BLACK else Color.WHITE)
+        chargeTile.background = rounded(if (charge) Color.WHITE else 0xFF26262B.toInt())
     }
 
     private fun buildUi(): ScrollView {
@@ -236,6 +255,12 @@ class MainActivity : Activity() {
         songTile = pill("") { val n = cycle("song", "Bounce"); GlyphLink.play(n); styleAuto() }
         root.addView(row(musicTile))
         root.addView(row(songTile))
+
+        root.addView(label("Automatic (charging)", 16f).apply { setPadding(0, dp(24), 0, dp(8)) })
+        root.addView(label("Shows how full the battery is for a few seconds when you wake the phone while it's plugged in", 13f, 0xFF9A9AA0.toInt()))
+        chargeTile = pill("") { toggleCharge() }
+        root.addView(row(chargeTile))
+        root.addView(row(pill("Test now") { testBattery() }))
 
         styleAuto()
 
