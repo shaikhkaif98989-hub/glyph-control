@@ -22,6 +22,8 @@ class MainActivity : Activity() {
     private lateinit var callsTile: TextView
     private lateinit var ringTile: TextView
     private lateinit var talkTile: TextView
+    private lateinit var musicTile: TextView
+    private lateinit var songTile: TextView
     private val tiles = mutableListOf<TextView>()
     private var zoneOn = BooleanArray(4)
     private val prefs by lazy { getSharedPreferences("glyph", MODE_PRIVATE) }
@@ -34,13 +36,13 @@ class MainActivity : Activity() {
         setContentView(buildUi())
         GlyphLink.onStatus = { status.text = it }
         status.text = GlyphLink.status
-        if (prefs.getBoolean("calls", false) && hasPhonePermission()) {
+        if ((prefs.getBoolean("calls", false) || prefs.getBoolean("music", false))) {
             startForegroundService(Intent(this, CallGlyphService::class.java))
         }
     }
 
     override fun onPause() {
-        if (!GlyphLink.callMode) GlyphLink.stop()
+        if (!GlyphLink.callMode && !GlyphLink.musicMode) GlyphLink.stop()
         super.onPause()
     }
 
@@ -52,11 +54,24 @@ class MainActivity : Activity() {
     private fun hasPhonePermission() =
         checkSelfPermission(Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED
 
+    private fun restartService() {
+        val i = Intent(this, CallGlyphService::class.java)
+        if (prefs.getBoolean("calls", false) || prefs.getBoolean("music", false)) {
+            startForegroundService(i)
+        } else {
+            stopService(i)
+        }
+    }
+
     private fun toggleCalls() {
         if (prefs.getBoolean("calls", false)) {
-            setCalls(false)
+            prefs.edit().putBoolean("calls", false).apply()
+            restartService()
+            styleAuto()
         } else if (hasPhonePermission()) {
-            setCalls(true)
+            prefs.edit().putBoolean("calls", true).apply()
+            restartService()
+            styleAuto()
         } else {
             requestPermissions(
                 arrayOf(Manifest.permission.READ_PHONE_STATE, Manifest.permission.POST_NOTIFICATIONS), 7
@@ -64,16 +79,22 @@ class MainActivity : Activity() {
         }
     }
 
-    override fun onRequestPermissionsResult(code: Int, perms: Array<out String>, res: IntArray) {
-        super.onRequestPermissionsResult(code, perms, res)
-        if (hasPhonePermission()) setCalls(true) else status.text = "Allow the Phone permission to use call lights"
+    private fun toggleMusic() {
+        val on = !prefs.getBoolean("music", false)
+        prefs.edit().putBoolean("music", on).apply()
+        restartService()
+        styleAuto()
     }
 
-    private fun setCalls(on: Boolean) {
-        prefs.edit().putBoolean("calls", on).apply()
-        val i = Intent(this, CallGlyphService::class.java)
-        if (on) startForegroundService(i) else stopService(i)
-        styleAuto()
+    override fun onRequestPermissionsResult(code: Int, perms: Array<out String>, res: IntArray) {
+        super.onRequestPermissionsResult(code, perms, res)
+        if (hasPhonePermission()) {
+            prefs.edit().putBoolean("calls", true).apply()
+            restartService()
+            styleAuto()
+        } else {
+            status.text = "Allow the Phone permission to use call lights"
+        }
     }
 
     private fun cycle(key: String, def: String): String {
@@ -136,12 +157,18 @@ class MainActivity : Activity() {
     }
 
     private fun styleAuto() {
-        val on = prefs.getBoolean("calls", false)
-        callsTile.text = if (on) "Call lights: ON (tap to turn off)" else "Call lights: OFF (tap to turn on)"
-        callsTile.setTextColor(if (on) Color.BLACK else Color.WHITE)
-        callsTile.background = rounded(if (on) Color.WHITE else 0xFF26262B.toInt())
+        val calls = prefs.getBoolean("calls", false)
+        callsTile.text = if (calls) "Call lights: ON (tap to turn off)" else "Call lights: OFF (tap to turn on)"
+        callsTile.setTextColor(if (calls) Color.BLACK else Color.WHITE)
+        callsTile.background = rounded(if (calls) Color.WHITE else 0xFF26262B.toInt())
         ringTile.text = "When phone rings: ${prefs.getString("ring", "Chase")}  (tap to change)"
         talkTile.text = "While on a call: ${prefs.getString("talk", "Off")}  (tap to change)"
+
+        val music = prefs.getBoolean("music", false)
+        musicTile.text = if (music) "Music lights: ON (tap to turn off)" else "Music lights: OFF (tap to turn on)"
+        musicTile.setTextColor(if (music) Color.BLACK else Color.WHITE)
+        musicTile.background = rounded(if (music) Color.WHITE else 0xFF26262B.toInt())
+        songTile.text = "While music plays: ${prefs.getString("song", "Bounce")}  (tap to change)"
     }
 
     private fun buildUi(): ScrollView {
@@ -203,6 +230,13 @@ class MainActivity : Activity() {
         root.addView(row(callsTile))
         root.addView(row(ringTile))
         root.addView(row(talkTile))
+
+        root.addView(label("Automatic (music)", 16f).apply { setPadding(0, dp(24), 0, dp(8)) })
+        musicTile = pill("") { toggleMusic() }
+        songTile = pill("") { val n = cycle("song", "Bounce"); GlyphLink.play(n); styleAuto() }
+        root.addView(row(musicTile))
+        root.addView(row(songTile))
+
         styleAuto()
 
         return ScrollView(this).apply {
