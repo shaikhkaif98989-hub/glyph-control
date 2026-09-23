@@ -25,13 +25,7 @@ class MainActivity : Activity() {
     private lateinit var talkTile: TextView
     private lateinit var musicTile: TextView
     private lateinit var songTile: TextView
-    private lateinit var ringSpeedTile: TextView
-    private lateinit var talkSpeedTile: TextView
-    private lateinit var songSpeedTile: TextView
     private lateinit var chargeTile: TextView
-
-    private val speedLabels = listOf("Slow", "Medium", "Fast", "Very fast")
-    private val speedValues = listOf(600, 300, 150, 80)
     private val tiles = mutableListOf<TextView>()
     private var zoneOn = BooleanArray(4)
     private val prefs by lazy { getSharedPreferences("glyph", MODE_PRIVATE) }
@@ -119,17 +113,22 @@ class MainActivity : Activity() {
         return next
     }
 
-    private fun speedLabelFor(ms: Int): String {
-        val i = speedValues.indexOf(ms)
-        return if (i >= 0) speedLabels[i] else "Medium"
-    }
-
-    private fun cycleSpeed(key: String): Int {
-        val cur = prefs.getInt(key, 300)
-        val i = speedValues.indexOf(cur).let { if (it < 0) 1 else it }
-        val next = speedValues[(i + 1) % speedValues.size]
-        prefs.edit().putInt(key, next).apply()
-        return next
+    // A slider that saves its speed (in ms) as you drag, and previews it when you let go.
+    private fun speedBar(prefKey: String, patternFor: () -> String): SeekBar {
+        val saved = prefs.getInt(prefKey, 300)
+        return SeekBar(this).apply {
+            max = 940
+            progress = (1000 - saved).coerceIn(0, 940)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
+                    if (fromUser) prefs.edit().putInt(prefKey, 1000 - p).apply()
+                }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}
+                override fun onStopTrackingTouch(sb: SeekBar?) {
+                    GlyphLink.play(patternFor(), (1000 - (sb?.progress ?: 700)).toLong())
+                }
+            })
+        }
     }
 
     private fun applyManual() {
@@ -196,15 +195,12 @@ class MainActivity : Activity() {
         callsTile.background = rounded(if (calls) Color.WHITE else 0xFF26262B.toInt())
         ringTile.text = "When phone rings: ${prefs.getString("ring", "Chase")}  (tap to change)"
         talkTile.text = "While on a call: ${prefs.getString("talk", "Off")}  (tap to change)"
-        ringSpeedTile.text = "Ring speed: ${speedLabelFor(prefs.getInt("ringSpeedMs", 300))}  (tap to change)"
-        talkSpeedTile.text = "Call speed: ${speedLabelFor(prefs.getInt("talkSpeedMs", 300))}  (tap to change)"
 
         val music = prefs.getBoolean("music", false)
         musicTile.text = if (music) "Music lights: ON (tap to turn off)" else "Music lights: OFF (tap to turn on)"
         musicTile.setTextColor(if (music) Color.BLACK else Color.WHITE)
         musicTile.background = rounded(if (music) Color.WHITE else 0xFF26262B.toInt())
         songTile.text = "While music plays: ${prefs.getString("song", "Bounce")}  (tap to change)"
-        songSpeedTile.text = "Music speed: ${speedLabelFor(prefs.getInt("songSpeedMs", 300))}  (tap to change)"
 
         val charge = prefs.getBoolean("charge", false)
         chargeTile.text = if (charge) "Charging lights: ON (tap to turn off)" else "Charging lights: OFF (tap to turn on)"
@@ -268,21 +264,21 @@ class MainActivity : Activity() {
         callsTile = pill("") { toggleCalls() }
         ringTile = pill("") { val n = cycle("ring", "Chase"); GlyphLink.play(n); styleAuto() }
         talkTile = pill("") { val n = cycle("talk", "Off"); GlyphLink.play(n); styleAuto() }
-        ringSpeedTile = pill("") { val ms = cycleSpeed("ringSpeedMs"); GlyphLink.play(prefs.getString("ring", "Chase") ?: "Off", ms.toLong()); styleAuto() }
-        talkSpeedTile = pill("") { val ms = cycleSpeed("talkSpeedMs"); GlyphLink.play(prefs.getString("talk", "Off") ?: "Off", ms.toLong()); styleAuto() }
         root.addView(row(callsTile))
         root.addView(row(ringTile))
-        root.addView(row(ringSpeedTile))
+        root.addView(label("Ring speed (right = faster)", 13f, 0xFF9A9AA0.toInt()).apply { setPadding(0, dp(8), 0, 0) })
+        root.addView(speedBar("ringSpeedMs") { prefs.getString("ring", "Chase") ?: "Off" })
         root.addView(row(talkTile))
-        root.addView(row(talkSpeedTile))
+        root.addView(label("Call speed (right = faster)", 13f, 0xFF9A9AA0.toInt()).apply { setPadding(0, dp(8), 0, 0) })
+        root.addView(speedBar("talkSpeedMs") { prefs.getString("talk", "Off") ?: "Off" })
 
         root.addView(label("Automatic (music)", 16f).apply { setPadding(0, dp(24), 0, dp(8)) })
         musicTile = pill("") { toggleMusic() }
         songTile = pill("") { val n = cycle("song", "Bounce"); GlyphLink.play(n); styleAuto() }
-        songSpeedTile = pill("") { val ms = cycleSpeed("songSpeedMs"); GlyphLink.play(prefs.getString("song", "Bounce") ?: "Off", ms.toLong()); styleAuto() }
         root.addView(row(musicTile))
         root.addView(row(songTile))
-        root.addView(row(songSpeedTile))
+        root.addView(label("Music speed (right = faster)", 13f, 0xFF9A9AA0.toInt()).apply { setPadding(0, dp(8), 0, 0) })
+        root.addView(speedBar("songSpeedMs") { prefs.getString("song", "Bounce") ?: "Off" })
 
         root.addView(label("Automatic (charging)", 16f).apply { setPadding(0, dp(24), 0, dp(8)) })
         root.addView(label("Shows how full the battery is for a few seconds when you wake the phone while it's plugged in", 13f, 0xFF9A9AA0.toInt()))
