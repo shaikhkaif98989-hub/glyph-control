@@ -284,11 +284,14 @@ class CallGlyphService : Service() {
         musicPlaying = false
     }
 
-    // True only for audio tagged as media (music/podcast apps), not games or other sounds.
+    // True only for audio a music/podcast app deliberately tags as "music" — games essentially never do this.
     private fun realMusicPlaying(am: AudioManager): Boolean = try {
-        am.activePlaybackConfigurations.any { it.audioAttributes?.usage == AudioAttributes.USAGE_MEDIA }
+        am.activePlaybackConfigurations.any {
+            val a = it.audioAttributes
+            a != null && a.usage == AudioAttributes.USAGE_MEDIA && a.contentType == AudioAttributes.CONTENT_TYPE_MUSIC
+        }
     } catch (e: Throwable) {
-        am.isMusicActive
+        false
     }
 
     // Looks at whether music is playing; a phone call always has priority.
