@@ -309,15 +309,21 @@ class CallGlyphService : Service() {
         }
     }
 
-    // Shows the battery percentage on the Glyph when the screen turns on while charging.
+    // Shows the battery percentage when you plug in, or when the screen turns on while charging.
     private fun startChargeWatch() {
         if (screenReceiver != null) return
         val r = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
-                if (intent?.action == Intent.ACTION_SCREEN_ON) showBatteryIfCharging()
+                when (intent?.action) {
+                    Intent.ACTION_SCREEN_ON, Intent.ACTION_POWER_CONNECTED -> showBatteryIfCharging()
+                }
             }
         }
-        registerReceiver(r, IntentFilter(Intent.ACTION_SCREEN_ON))
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_POWER_CONNECTED)
+        }
+        registerReceiver(r, filter, RECEIVER_NOT_EXPORTED)
         screenReceiver = r
     }
 
