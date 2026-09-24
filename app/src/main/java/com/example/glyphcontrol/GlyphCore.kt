@@ -42,7 +42,11 @@ object GlyphLink {
     var status = "Connecting..."
     var onStatus: ((String) -> Unit)? = null
 
-    val patternNames = listOf("Off", "Chase", "Bounce", "Fill up", "Blink", "Breathe", "All on")
+    val patternNames = listOf(
+        "Off", "Chase", "Reverse chase", "Bounce", "Wave",
+        "Fill up", "Countdown", "Alternate", "Blink",
+        "Heartbeat", "Random", "Breathe", "All on"
+    )
 
     private fun note(s: String) {
         status = s
@@ -141,9 +145,15 @@ object GlyphLink {
         val chase = all.map { listOf(it) }
         when (name) {
             "Chase" -> startLoop(chase)
+            "Reverse chase" -> startLoop(chase.reversed())
             "Bounce" -> startLoop(chase + (zones - 2 downTo 1).map { listOf(it) })
+            "Wave" -> startLoop((0 until zones).map { s -> listOf(s, (s + 1) % zones) })
             "Fill up" -> startLoop(all.map { n -> all.take(n + 1) } + listOf(emptyList<Int>()))
+            "Countdown" -> startLoop((zones downTo 0).map { n -> all.take(n) })
+            "Alternate" -> startLoop(listOf(all.filterIndexed { i, _ -> i % 2 == 0 }, all.filterIndexed { i, _ -> i % 2 != 0 }))
             "Blink" -> startLoop(listOf(all, emptyList<Int>()))
+            "Heartbeat" -> startLoop(listOf(all, emptyList<Int>(), all, emptyList<Int>(), emptyList<Int>(), emptyList<Int>()))
+            "Random" -> startLoop(chase.shuffled())
             "Breathe" -> breathe()
             "All on" -> show(all)
             else -> show(emptyList())
