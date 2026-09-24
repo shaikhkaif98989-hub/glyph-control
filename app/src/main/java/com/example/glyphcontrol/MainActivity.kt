@@ -2,6 +2,7 @@ package com.example.glyphcontrol
 
 import android.Manifest
 import android.app.Activity
+import android.app.AppOpsManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
@@ -9,6 +10,8 @@ import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.BatteryManager
 import android.os.Bundle
+import android.os.Process
+import android.provider.Settings
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -25,6 +28,7 @@ class MainActivity : Activity() {
     private lateinit var talkTile: TextView
     private lateinit var musicTile: TextView
     private lateinit var songTile: TextView
+    private lateinit var usageTile: TextView
     private lateinit var chargeTile: TextView
     private val tiles = mutableListOf<TextView>()
     private var zoneOn = BooleanArray(4)
@@ -58,6 +62,11 @@ class MainActivity : Activity() {
 
     private fun hasPhonePermission() =
         checkSelfPermission(Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED
+
+    private fun hasUsageAccess(): Boolean = try {
+        val aom = getSystemService(AppOpsManager::class.java) ?: return false
+        aom.unsafeCheckOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), packageName) == AppOpsManager.MODE_ALLOWED
+    } catch (e: Throwable) { false }
 
     private fun restartService() {
         val i = Intent(this, CallGlyphService::class.java)
@@ -202,6 +211,13 @@ class MainActivity : Activity() {
         musicTile.background = rounded(if (music) Color.WHITE else 0xFF26262B.toInt())
         songTile.text = "While music plays: ${prefs.getString("song", "Bounce")}  (tap to change)"
 
+        usageTile.text = if (hasUsageAccess())
+            "Usage access: granted (YouTube won't trigger this)"
+        else
+            "Usage access: tap to grant (stops YouTube from triggering this)"
+        usageTile.setTextColor(if (hasUsageAccess()) Color.BLACK else Color.WHITE)
+        usageTile.background = rounded(if (hasUsageAccess()) Color.WHITE else 0xFF26262B.toInt())
+
         val charge = prefs.getBoolean("charge", false)
         chargeTile.text = if (charge) "Charging lights: ON (tap to turn off)" else "Charging lights: OFF (tap to turn on)"
         chargeTile.setTextColor(if (charge) Color.BLACK else Color.WHITE)
@@ -279,6 +295,8 @@ class MainActivity : Activity() {
         root.addView(row(songTile))
         root.addView(label("Music speed (right = faster)", 13f, 0xFF9A9AA0.toInt()).apply { setPadding(0, dp(8), 0, 0) })
         root.addView(speedBar("songSpeedMs") { prefs.getString("song", "Bounce") ?: "Off" })
+        usageTile = pill("") { startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)) }
+        root.addView(row(usageTile))
 
         root.addView(label("Automatic (charging)", 16f).apply { setPadding(0, dp(24), 0, dp(8)) })
         root.addView(label("Shows how full the battery is for a few seconds when you wake the phone while it's plugged in", 13f, 0xFF9A9AA0.toInt()))
