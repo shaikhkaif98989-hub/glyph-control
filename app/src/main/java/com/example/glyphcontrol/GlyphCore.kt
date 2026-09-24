@@ -1,10 +1,13 @@
 package com.example.glyphcontrol
 
 import android.Manifest
+import android.app.AppOpsManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.app.usage.UsageEvents
+import android.app.usage.UsageStatsManager
 import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
@@ -18,6 +21,7 @@ import android.os.BatteryManager
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.Process
 import android.telephony.TelephonyCallback
 import android.telephony.TelephonyManager
 import com.nothing.ketchum.Common
@@ -304,10 +308,33 @@ class CallGlyphService : Service() {
         false
     }
 
+    // Apps to never treat as "music", even if their audio looks like music (YouTube tags video audio this way too).
+    private val blockedApps = setOf("com.google.android.youtube")
+
+    private fun hasUsageAccess(): Boolean = try {
+        val aom = getSystemService(AppOpsManager::class.java) ?: return false
+        aom.unsafeCheckOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), packageName) == AppOpsManager.MODE_ALLOWED
+    } catch (e: Throwable) { false }
+
+    // Which app was last brought to the foreground, using the last 10 seconds of usage events.
+    private fun foregroundApp(): String? = try {
+        val usm = getSystemService(UsageStatsManager::class.java) ?: return null
+        val end = System.currentTimeMillis()
+        val events = usm.queryEvents(end - 10_000, end)
+        var pkg: String? = null
+        val e = UsageEvents.Event()
+        while (events.hasNextEvent()) {
+            events.getNextEvent(e)
+            if (e.eventType == UsageEvents.Event.ACTIVITY_RESUMED) pkg = e.packageName
+        }
+        pkg
+    } catch (e: Throwable) { null }
+
     // Looks at whether music is playing; a phone call always has priority.
     private fun checkMusic(force: Boolean = false) {
         val am = getSystemService(AudioManager::class.java) ?: return
-        val now = realMusicPlaying(am)
+        var now = realMusicPlaying(am)
+        if (now && hasUsageAccess() && blockedApps.contains(foregroundApp())) now = false
         if (now == musicPlaying && !force) return
         musicPlaying = now
         if (GlyphLink.callMode) return
