@@ -15,7 +15,6 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
-import android.media.AudioAttributes
 import android.media.AudioManager
 import android.os.BatteryManager
 import android.os.Handler
@@ -32,7 +31,7 @@ import kotlin.math.ceil
 // One shared connection to the Glyph, used by the app screen and the background service.
 object GlyphLink {
     private var gm: GlyphManager? = null
-    private var started = false
+    private var connecting = false
     private val handler = Handler(Looper.getMainLooper())
     private var running: Runnable? = null
     private var batteryGen = 0
@@ -66,13 +65,13 @@ object GlyphLink {
     } catch (e: Throwable) { null }
 
     fun start(ctx: Context) {
-        if (started) return
-        started = true
+        if (ready || connecting) return
+        connecting = true
         zones = if (isModel("is25111")) 6 else 4
-        val g = GlyphManager.getInstance(ctx.applicationContext)
-        gm = g
+        val g = gm ?: GlyphManager.getInstance(ctx.applicationContext).also { gm = it }
         g.init(object : GlyphManager.Callback {
             override fun onServiceConnected(name: ComponentName?) {
+                connecting = false
                 try {
                     val d = devConst(if (zones == 6) "DEVICE_25111" else "DEVICE_25131")
                     if (d != null) g.register(d) else g.register()
@@ -86,6 +85,7 @@ object GlyphLink {
             }
 
             override fun onServiceDisconnected(name: ComponentName?) {
+                connecting = false
                 ready = false
                 try { g.closeSession() } catch (e: Throwable) {}
                 note("Disconnected")
@@ -213,6 +213,14 @@ class CallGlyphService : Service() {
         }
     }
 
+    // Reconnects to the Glyph if the connection ever drops (e.g. a scheduled Glyph-off period).
+    private val healthCheck = object : Runnable {
+        override fun run() {
+            if (!GlyphLink.ready) GlyphLink.start(this@CallGlyphService)
+            handler.postDelayed(this, 30_000)
+        }
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -228,6 +236,7 @@ class CallGlyphService : Service() {
             .build()
         startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         GlyphLink.start(this)
+        handler.post(healthCheck)
         sync()
         return START_STICKY
     }
@@ -298,29 +307,17 @@ class CallGlyphService : Service() {
         musicPlaying = false
     }
 
-    // True only for audio a music/podcast app deliberately tags as "music" — games essentially never do this.
-    private fun realMusicPlaying(am: AudioManager): Boolean = try {
-        am.activePlaybackConfigurations.any {
-            val a = it.audioAttributes
-            a != null && a.usage == AudioAttributes.USAGE_MEDIA && a.contentType == AudioAttributes.CONTENT_TYPE_MUSIC
-        }
-    } catch (e: Throwable) {
-        false
-    }
-
-    // Apps to never treat as "music", even if their audio looks like music (YouTube tags video audio this way too).
-    private val blockedApps = setOf("com.google.android.youtube")
-
     private fun hasUsageAccess(): Boolean = try {
         val aom = getSystemService(AppOpsManager::class.java) ?: return false
         aom.unsafeCheckOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), packageName) == AppOpsManager.MODE_ALLOWED
     } catch (e: Throwable) { false }
 
-    // Which app was last brought to the foreground, using the last 10 seconds of usage events.
+    // Which app was last brought to the foreground. Looks back a few hours so a long session
+    // (with no new "switched app" event) still counts, not just the first few seconds.
     private fun foregroundApp(): String? = try {
         val usm = getSystemService(UsageStatsManager::class.java) ?: return null
         val end = System.currentTimeMillis()
-        val events = usm.queryEvents(end - 10_000, end)
+        val events = usm.queryEvents(end - 3 * 60 * 60 * 1000, end)
         var pkg: String? = null
         val e = UsageEvents.Event()
         while (events.hasNextEvent()) {
@@ -330,11 +327,18 @@ class CallGlyphService : Service() {
         pkg
     } catch (e: Throwable) { null }
 
+    // Only these apps count as "music" — safer than guessing from the audio itself, since
+    // YouTube's audio looks identical to a music app's audio as far as Android can tell.
+    private val musicApps = setOf(
+        "com.spotify.music", "com.google.android.apps.youtube.music", "com.apple.android.music",
+        "com.amazon.mp3", "com.soundcloud.android", "deezer.android.app", "com.google.android.music",
+        "com.google.android.apps.podcasts", "com.bsbportal.music", "com.gaana"
+    )
+
     // Looks at whether music is playing; a phone call always has priority.
     private fun checkMusic(force: Boolean = false) {
         val am = getSystemService(AudioManager::class.java) ?: return
-        var now = realMusicPlaying(am)
-        if (now && hasUsageAccess() && blockedApps.contains(foregroundApp())) now = false
+        val now = hasUsageAccess() && musicApps.contains(foregroundApp()) && am.isMusicActive
         if (now == musicPlaying && !force) return
         musicPlaying = now
         if (GlyphLink.callMode) return
@@ -377,6 +381,7 @@ class CallGlyphService : Service() {
     }
 
     override fun onDestroy() {
+        handler.removeCallbacks(healthCheck)
         unlisten()
         stopWatch()
         stopChargeWatch()
