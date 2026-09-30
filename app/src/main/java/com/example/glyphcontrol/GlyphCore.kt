@@ -1,13 +1,10 @@
 package com.example.glyphcontrol
 
 import android.Manifest
-import android.app.AppOpsManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
-import android.app.usage.UsageEvents
-import android.app.usage.UsageStatsManager
 import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
@@ -15,12 +12,13 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
-import android.media.AudioManager
+import android.media.session.MediaSessionManager
+import android.media.session.PlaybackState
 import android.os.BatteryManager
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
-import android.os.Process
+import android.service.notification.NotificationListenerService
 import android.telephony.TelephonyCallback
 import android.telephony.TelephonyManager
 import com.nothing.ketchum.Common
@@ -31,7 +29,6 @@ import kotlin.math.ceil
 // One shared connection to the Glyph, used by the app screen and the background service.
 object GlyphLink {
     private var gm: GlyphManager? = null
-    private var connecting = false
     private val handler = Handler(Looper.getMainLooper())
     private var running: Runnable? = null
     private var batteryGen = 0
@@ -64,33 +61,35 @@ object GlyphLink {
         Glyph::class.java.getField(n).get(null) as? String
     } catch (e: Throwable) { null }
 
+    // Safe to call repeatedly (e.g. from a periodic health-check) — a no-op once already connected.
     fun start(ctx: Context) {
-        if (ready || connecting) return
-        connecting = true
-        zones = if (isModel("is25111")) 6 else 4
-        val g = gm ?: GlyphManager.getInstance(ctx.applicationContext).also { gm = it }
-        g.init(object : GlyphManager.Callback {
-            override fun onServiceConnected(name: ComponentName?) {
-                connecting = false
-                try {
-                    val d = devConst(if (zones == 6) "DEVICE_25111" else "DEVICE_25131")
-                    if (d != null) g.register(d) else g.register()
-                    g.openSession()
-                    ready = true
-                    note("Connected")
-                    val todo = pending.toList()
-                    pending.clear()
-                    todo.forEach { it() }
-                } catch (e: Throwable) { note("Can't connect: ${e.message}") }
-            }
+        if (ready) return
+        try {
+            zones = if (isModel("is25111")) 6 else 4
+            val g = gm ?: GlyphManager.getInstance(ctx.applicationContext).also { gm = it }
+            g.init(object : GlyphManager.Callback {
+                override fun onServiceConnected(name: ComponentName?) {
+                    try {
+                        val d = devConst(if (zones == 6) "DEVICE_25111" else "DEVICE_25131")
+                        if (d != null) g.register(d) else g.register()
+                        g.openSession()
+                        ready = true
+                        note("Connected")
+                        val todo = pending.toList()
+                        pending.clear()
+                        todo.forEach { it() }
+                    } catch (e: Throwable) { note("Can't connect: ${e.message}") }
+                }
 
-            override fun onServiceDisconnected(name: ComponentName?) {
-                connecting = false
-                ready = false
-                try { g.closeSession() } catch (e: Throwable) {}
-                note("Disconnected")
-            }
-        })
+                override fun onServiceDisconnected(name: ComponentName?) {
+                    ready = false
+                    try { g.closeSession() } catch (e: Throwable) {}
+                    note("Disconnected")
+                }
+            })
+        } catch (e: Throwable) {
+            note("Can't connect: ${e.message}")
+        }
     }
 
     private fun whenReady(block: () -> Unit) {
@@ -197,6 +196,10 @@ object GlyphLink {
     }
 }
 
+// Minimal listener component. Its only purpose is to satisfy Android's requirement for reading
+// active media sessions (needs the person to grant "Notification access" once).
+class GlyphNotificationListener : NotificationListenerService()
+
 // Runs in the background: lights the Glyph for calls, music, and a charging-pickup battery display.
 class CallGlyphService : Service() {
     private var callback: TelephonyCallback? = null
@@ -216,7 +219,7 @@ class CallGlyphService : Service() {
     // Reconnects to the Glyph if the connection ever drops (e.g. a scheduled Glyph-off period).
     private val healthCheck = object : Runnable {
         override fun run() {
-            if (!GlyphLink.ready) GlyphLink.start(this@CallGlyphService)
+            GlyphLink.start(this@CallGlyphService)
             handler.postDelayed(this, 30_000)
         }
     }
@@ -230,12 +233,11 @@ class CallGlyphService : Service() {
         )
         val n = Notification.Builder(this, "glyph")
             .setContentTitle("Glyph lights are on")
-            .setContentText("Your Glyph reacts to calls, music and charging")
+            .setContentText("Reacts to calls, music and charging")
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setOngoing(true)
             .build()
         startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
-        GlyphLink.start(this)
         handler.post(healthCheck)
         sync()
         return START_STICKY
@@ -307,38 +309,27 @@ class CallGlyphService : Service() {
         musicPlaying = false
     }
 
-    private fun hasUsageAccess(): Boolean = try {
-        val aom = getSystemService(AppOpsManager::class.java) ?: return false
-        aom.unsafeCheckOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), packageName) == AppOpsManager.MODE_ALLOWED
-    } catch (e: Throwable) { false }
-
-    // Which app was last brought to the foreground. Looks back a few hours so a long session
-    // (with no new "switched app" event) still counts, not just the first few seconds.
-    private fun foregroundApp(): String? = try {
-        val usm = getSystemService(UsageStatsManager::class.java) ?: return null
-        val end = System.currentTimeMillis()
-        val events = usm.queryEvents(end - 3 * 60 * 60 * 1000, end)
-        var pkg: String? = null
-        val e = UsageEvents.Event()
-        while (events.hasNextEvent()) {
-            events.getNextEvent(e)
-            if (e.eventType == UsageEvents.Event.ACTIVITY_RESUMED) pkg = e.packageName
-        }
-        pkg
-    } catch (e: Throwable) { null }
-
-    // Only these apps count as "music" — safer than guessing from the audio itself, since
-    // YouTube's audio looks identical to a music app's audio as far as Android can tell.
+    // Only these apps count as "music". Filtering by package name on the media session itself —
+    // not by guessing from audio, and not by which app is on screen — so this works correctly
+    // even when the music app is backgrounded or the phone is locked, and never fires for
+    // regular YouTube (video), games, or anything else not on this list.
     private val musicApps = setOf(
         "com.spotify.music", "com.google.android.apps.youtube.music", "com.apple.android.music",
         "com.amazon.mp3", "com.soundcloud.android", "deezer.android.app", "com.google.android.music",
         "com.google.android.apps.podcasts", "com.bsbportal.music", "com.gaana"
     )
 
+    private fun realMusicPlaying(): Boolean = try {
+        val msm = getSystemService(MediaSessionManager::class.java) ?: return false
+        val comp = ComponentName(this, GlyphNotificationListener::class.java)
+        msm.getActiveSessions(comp).any { c ->
+            musicApps.contains(c.packageName) && c.playbackState?.state == PlaybackState.STATE_PLAYING
+        }
+    } catch (e: Throwable) { false }
+
     // Looks at whether music is playing; a phone call always has priority.
     private fun checkMusic(force: Boolean = false) {
-        val am = getSystemService(AudioManager::class.java) ?: return
-        val now = hasUsageAccess() && musicApps.contains(foregroundApp()) && am.isMusicActive
+        val now = realMusicPlaying()
         if (now == musicPlaying && !force) return
         musicPlaying = now
         if (GlyphLink.callMode) return
