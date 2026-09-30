@@ -2,7 +2,6 @@ package com.example.glyphcontrol
 
 import android.Manifest
 import android.app.Activity
-import android.app.AppOpsManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
@@ -10,7 +9,6 @@ import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.BatteryManager
 import android.os.Bundle
-import android.os.Process
 import android.provider.Settings
 import android.view.Gravity
 import android.view.View
@@ -28,7 +26,7 @@ class MainActivity : Activity() {
     private lateinit var talkTile: TextView
     private lateinit var musicTile: TextView
     private lateinit var songTile: TextView
-    private lateinit var usageTile: TextView
+    private lateinit var notifTile: TextView
     private lateinit var chargeTile: TextView
     private val tiles = mutableListOf<TextView>()
     private var zoneOn = BooleanArray(4)
@@ -47,6 +45,11 @@ class MainActivity : Activity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        styleAuto()
+    }
+
     override fun onPause() {
         if (!GlyphLink.callMode && !GlyphLink.musicMode) GlyphLink.stop()
         super.onPause()
@@ -63,10 +66,10 @@ class MainActivity : Activity() {
     private fun hasPhonePermission() =
         checkSelfPermission(Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED
 
-    private fun hasUsageAccess(): Boolean = try {
-        val aom = getSystemService(AppOpsManager::class.java) ?: return false
-        aom.unsafeCheckOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), packageName) == AppOpsManager.MODE_ALLOWED
-    } catch (e: Throwable) { false }
+    private fun hasNotificationAccess(): Boolean {
+        val flat = Settings.Secure.getString(contentResolver, "enabled_notification_listeners") ?: return false
+        return flat.contains(packageName)
+    }
 
     private fun restartService() {
         val i = Intent(this, CallGlyphService::class.java)
@@ -211,12 +214,12 @@ class MainActivity : Activity() {
         musicTile.background = rounded(if (music) Color.WHITE else 0xFF26262B.toInt())
         songTile.text = "While music plays: ${prefs.getString("song", "Bounce")}  (tap to change)"
 
-        usageTile.text = if (hasUsageAccess())
-            "Usage access: granted (YouTube won't trigger this)"
+        notifTile.text = if (hasNotificationAccess())
+            "Notification access: granted"
         else
-            "Usage access: tap to grant (stops YouTube from triggering this)"
-        usageTile.setTextColor(if (hasUsageAccess()) Color.BLACK else Color.WHITE)
-        usageTile.background = rounded(if (hasUsageAccess()) Color.WHITE else 0xFF26262B.toInt())
+            "Notification access: tap to grant (needed for music lights)"
+        notifTile.setTextColor(if (hasNotificationAccess()) Color.BLACK else Color.WHITE)
+        notifTile.background = rounded(if (hasNotificationAccess()) Color.WHITE else 0xFF26262B.toInt())
 
         val charge = prefs.getBoolean("charge", false)
         chargeTile.text = if (charge) "Charging lights: ON (tap to turn off)" else "Charging lights: OFF (tap to turn on)"
@@ -289,14 +292,15 @@ class MainActivity : Activity() {
         root.addView(speedBar("talkSpeedMs") { prefs.getString("talk", "Off") ?: "Off" })
 
         root.addView(label("Automatic (music)", 16f).apply { setPadding(0, dp(24), 0, dp(8)) })
+        root.addView(label("Works even while your phone is locked, as long as a supported music app is playing", 13f, 0xFF9A9AA0.toInt()))
         musicTile = pill("") { toggleMusic() }
         songTile = pill("") { val n = cycle("song", "Bounce"); GlyphLink.play(n); styleAuto() }
         root.addView(row(musicTile))
         root.addView(row(songTile))
         root.addView(label("Music speed (right = faster)", 13f, 0xFF9A9AA0.toInt()).apply { setPadding(0, dp(8), 0, 0) })
         root.addView(speedBar("songSpeedMs") { prefs.getString("song", "Bounce") ?: "Off" })
-        usageTile = pill("") { startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)) }
-        root.addView(row(usageTile))
+        notifTile = pill("") { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }
+        root.addView(row(notifTile))
 
         root.addView(label("Automatic (charging)", 16f).apply { setPadding(0, dp(24), 0, dp(8)) })
         root.addView(label("Shows how full the battery is for a few seconds when you wake the phone while it's plugged in", 13f, 0xFF9A9AA0.toInt()))
